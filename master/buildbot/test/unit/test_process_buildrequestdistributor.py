@@ -558,6 +558,78 @@ class TestMaybeStartBuilds(TestBRDBase):
             ('test-worker2', 12)])
 
     @defer.inlineCallbacks
+    def test_limited_by_available_workers_and_nextWorker(self):
+        """Set worker test-worker1 to be unavailable. Set function nextWorker to
+        accpet different workers for different build requests.
+        Uavailable worker for br 10 shouldn't stall other brs to be claimed.
+        Regression test for #4838 and #3658
+        """
+
+        def _nextWorker(builder, workers, br):
+            allowed = {
+                10: ["test-worker1"],
+                11: ["test-worker2"],
+            }
+            for worker in workers:
+                if worker.name in allowed[br.id]:
+                    return worker
+        self.bldr.config.nextWorker = _nextWorker
+
+        self.addWorkers({'test-worker1': 0, 'test-worker2': 1})
+        rows = self.base_rows + [
+            fakedb.BuildRequest(id=10, buildsetid=11, builderid=77,
+                                submitted_at=130000),
+            fakedb.BuildRequest(id=11, buildsetid=11, builderid=77,
+                                submitted_at=135000),
+        ]
+        yield self.do_test_maybeStartBuildsOnBuilder(rows=rows,
+                                                     exp_claims=[11], exp_builds=[
+                                                         ('test-worker2', [11])])
+
+    @defer.inlineCallbacks
+    def test_limited_by_nextWorker_and_canStartBuild(self):
+        """Set nextWorker to accpet some combination of worker/br and
+        set canStartBuild to accpet some other combination of worker/br.
+        Both rules should be met to claim build. Worker test-worker1 shouldn't
+        be used by br 11.
+        Regression test for #4838
+        """
+
+        def _nextWorker(builder, workers, br):
+            workers = workers[:]
+            workers.sort(key=lambda a: a.name)
+            allowed = {
+                10: ["test-worker1", "test-worker2"],
+                11: ["test-worker2"],
+            }
+            for worker in workers:
+                if worker.name in allowed[br.id]:
+                    return worker
+        self.bldr.config.nextWorker = _nextWorker
+
+        def _canStartBuild(worker, breq):
+            result = (worker.name, breq.id)
+            allowed = [
+                ("test-worker2", 10),
+                ("test-worker1", 11),
+                ("test-worker2", 11),
+            ]
+            return defer.succeed(result in allowed)
+        self.bldr.config.canStartBuild = _canStartBuild
+
+        self.addWorkers(
+            {'test-worker1': 1, 'test-worker2': 1})
+        rows = self.base_rows + [
+            fakedb.BuildRequest(id=10, buildsetid=11, builderid=77,
+                                submitted_at=130000),
+            fakedb.BuildRequest(id=11, buildsetid=11, builderid=77,
+                                submitted_at=135000),
+        ]
+        yield self.do_test_maybeStartBuildsOnBuilder(rows=rows,
+                                                     exp_claims=[10], exp_builds=[
+                                                         ('test-worker2', [10])])
+
+    @defer.inlineCallbacks
     def test_unlimited(self):
         self.bldr.config.nextWorker = nth_worker(-1)
         self.addWorkers({'test-worker1': 1, 'test-worker2': 1})
