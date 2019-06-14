@@ -143,11 +143,9 @@ class BasicBuildChooser(BuildChooserBase):
     #   * config.nextWorker  (or random.choice if not set)
     #   * config.nextBuild  (or "pop top" if not set)
     #
-    # For N workers, this will call nextWorker at most N times. If nextWorker
-    # returns a worker that cannot satisfy the build chosen by nextBuild,
-    # it will search for a worker that can satisfy the build. If one is found,
-    # the workers that cannot be used are "recycled" back into a list
-    # to be tried, in order, for the next chosen build.
+    # If nextWorker returns a worker that cannot satisfy the build chosen by
+    # nextBuild, it will search for a worker that can satisfy the build.
+    # Unused workers will be available for the next build to try them again.
     #
     # We check whether Builder.canStartBuild returns True for a particular
     # worker. It evaluates any Build properties that are known before build
@@ -162,14 +160,9 @@ class BasicBuildChooser(BuildChooserBase):
             self.nextWorker = lambda _, workers, __: random.choice(
                 workers) if workers else None
 
-        self.workerpool = self.bldr.getAvailableWorkers()
-
-        # Pick workers one at a time from the pool, and if the Builder says
-        # they're usable (eg, locks can be satisfied), then prefer those
-        # workers.
-        self.preferredWorkers = []
-
         self.nextBuild = self.bldr.config.nextBuild
+        self.availableWorkers = self.bldr.getAvailableWorkers()
+        self.workerpool = []
 
     @defer.inlineCallbacks
     def popNextBuild(self):
@@ -181,32 +174,26 @@ class BasicBuildChooser(BuildChooserBase):
             if not breq:
                 break
 
-            #  2. pick a worker
-            worker = yield self._popNextWorker(breq)
-            if not worker:
-                break
-
             # either satisfy this build or we leave it for another day
             self._removeBuildRequest(breq)
 
-            #  3. make sure worker+ is usable for the breq
-            recycledWorkers = []
-            while worker:
+            # refresh workerpool before choosing worker for this build request
+            self._refreshWorkerpool()
+            while True:
+                #  2. pick a worker
+                worker = yield self._popNextWorker(breq)
+                if not worker:
+                    break
+
+                #  3. make sure worker+ is usable for the breq
                 canStart = yield self.canStartBuild(worker, breq)
                 if canStart:
                     break
-                # try a different worker
-                recycledWorkers.append(worker)
-                worker = yield self._popNextWorker(breq)
-
-            # recycle the workers that we didn't use to the head of the queue
-            # this helps ensure we run 'nextWorker' only once per worker choice
-            if recycledWorkers:
-                self._unpopWorkers(recycledWorkers)
 
             #  4. done? otherwise we will try another build
             if worker:
                 nextBuild = (worker, breq)
+                self.availableWorkers.remove(worker)
                 break
 
         return nextBuild
@@ -238,11 +225,6 @@ class BasicBuildChooser(BuildChooserBase):
 
     @defer.inlineCallbacks
     def _popNextWorker(self, buildrequest):
-        # use 'preferred' workers first, if we have some ready
-        if self.preferredWorkers:
-            worker = self.preferredWorkers.pop(0)
-            return worker
-
         while self.workerpool:
             try:
                 worker = yield self.nextWorker(self.bldr, self.workerpool, buildrequest)
@@ -260,9 +242,8 @@ class BasicBuildChooser(BuildChooserBase):
 
         return None
 
-    def _unpopWorkers(self, workers):
-        # push the workers back to the front
-        self.preferredWorkers[:0] = workers
+    def _refreshWorkerpool(self):
+        self.workerpool = self.availableWorkers[:]
 
     def canStartBuild(self, worker, breq):
         return self.bldr.canStartBuild(worker, breq)
